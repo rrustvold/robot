@@ -11,6 +11,7 @@ import sys, getopt
 
 import atexit
 
+
 class robot():
 
     def __init__(self, IC=[0.]*6, simulation=False):
@@ -38,7 +39,7 @@ class robot():
       self.x_h = IC #rob's state estimate 
 
       self.servo = Adafruit_PWM_Servo_Driver.PWM(address=0x60)
-      self.servo.setPWMFreq(305)
+      self.servo.setPWMFreq(50)
 
       self.zRecord = np.zeros((6,10000))
       self.zCount = 0
@@ -477,6 +478,8 @@ class robot():
         t1 = time.time()
         
         while self.mypi.read(self.ECHO_PIN) == 1:
+            if time.time() > t1+1.0:
+                raise Exception('Timeout: took too long to receive echo signal')
             pass
         t2 = time.time()
         
@@ -491,8 +494,12 @@ class robot():
     def turn_servo(self, angle_deg):
         #takes in an angle from 0 to 180 and sets the servo to it
         # I think the servo needs 5V to work well.
+        # futaba s3003 wants a 50 Hz signal
+ 
         duty = angle_deg / 180.
-        self.servo.setPWM(14, 0, int(4096*duty))
+        off = np.interp(angle_deg, [0,180], [150, 525])
+        self.servo.setPWM(14, 0, int(off))
+
 
     def error_norm(self, state):
         # returns the euclidean distance (2-norm) of the current state
@@ -537,6 +544,34 @@ class robot():
         print "\n norm:", self.error_norm(np.subtract(x_target, x_h))
         print "total time: ", totalTime
         self.drive(0,0)
+
+
+    def keyboard_control(self):
+        ''' drive the car using a keyboard keys'''
+
+        main = tk.Tk()
+        def forward(event):
+            self.drive(uL=100, uR=100)
+
+        def left(event):
+            self.drive(uL=0, uR=100)
+
+        def right(event):
+            self.drive(uL=100, uR=0)
+
+        def stop(event):
+            self.drive()
+
+        frame = tk.Frame(main, width=100, height=100)
+        main.bind('<Left>', left)
+        main.bind('<Right>', right)
+        main.bind('<Up>', forward)
+        main.bind('<KeyRelease-Left>', stop)
+        main.bind('<KeyRelease-Right>', stop)
+        main.bind('<KeyRelease-Up>', stop)
+
+        frame.pack()
+        frame.mainloop()
         
         
             
@@ -546,7 +581,9 @@ class robot():
     
 #robot.turnOffMotors()
 
-
+if __name__ == '__main__':
+    rob = robot()
+    
 
 
 

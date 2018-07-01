@@ -7,17 +7,30 @@ import atexit
 import time
 import usb.core, usb.util
 import pigpio
-
+import threading
+import picamera
+import io, struct
 from socket import socket, gethostbyname, AF_INET, SOCK_DGRAM
-import sys
+
+# for receiving input commands
 PORT_NUMBER = 5000
-SERVER_IP = '192.168.1.21'
 SIZE = 1024
-
 hostName = gethostbyname( '0.0.0.0' )
-
 mySocket = socket( AF_INET, SOCK_DGRAM )
 mySocket.bind( (hostName, PORT_NUMBER) )
+
+#for sending distance data back
+PORT_NUMBER2 = 5001
+LAPTOP_IP = '192.168.1.25'
+sendSocket = socket( AF_INET, SOCK_DGRAM )
+
+#for video streaming
+vidSocket = socket()
+vidSocket.connect((LAPTOP_IP, 8000))
+connection = vidSocket.makefile('wb')
+
+
+
 
 class robot():
 
@@ -148,115 +161,10 @@ class robot():
         else:
             return meters
 
-    def joystick(self):
-        '''
-        turns on control via joystick
-        '''
-        self.servo.setPWMFreq(50)
-        import pygame
-        pygame.init()
-        clk = pygame.time.Clock()
-        joy = pygame.joystick.Joystick(0)
-        joy.init()
-
-        size = width, height = 600, 600
-
-        screen = pygame.display.set_mode(size)
-        pygame.display.set_caption("Tester")
-
-        frameRect = pygame.Rect((45,45), (510,510))
-
-        crosshair = pygame.surface.Surface((10,10))
-        crosshair.fill(pygame.Color("magenta"))
-        pygame.draw.circle(crosshair, pygame.Color("blue"), (5,5), 5, 0)
-        crosshair.set_colorkey(pygame.Color("magenta"), pygame.RLEACCEL)
-        crosshair = crosshair.convert()
-
-        writer = pygame.font.Font(pygame.font.get_default_font(), 15)
-        buttons = {}
-        for b in range(joy.get_numbuttons()):
-          buttons[b] = [
-            writer.render(
-              hex(b)[2:].upper(),
-              1,
-              pygame.Color("red"),
-              pygame.Color("black")
-              ).convert(),
-            (15*b+45, 560)
-             ]
-
-        while True:
-          pygame.event.pump()
-          for events in pygame.event.get():
-            if events.type == pygame.QUIT:
-              pygame.quit()
-              sys.exit()
-
-          screen.fill(pygame.Color("black"))
-          
-          if self.useUltrasonic:
-              try:
-                  rangeTxt = writer.render(str(self.get_range()),
-                                1,
-                                pygame.Color("red"),
-                                pygame.Color("black")
-                                ).convert()
-              except:
-                  pass
-
-              screen.blit(rangeTxt, (100,100))
-
-          # x, y, and z are the roll, pitch, and yaw axes
-          # they are a value from [-1,1]
-
-          
-
-          x = joy.get_axis(0)  # positive is to the right
-          y = joy.get_axis(1)
-          z = joy.get_axis(2)
-          hat = joy.get_hat(0)
-
-          
-          
-
-          # use the y (pitch) as a throttle and x (roll) for direction
-
-          #scale uL and uR by y
-          uL = uR = self.u_max*y*-1
-
-          if x > 0:
-              uR = (1-x)*uR
-              self.drive(uL, uR)
-          else :
-              uL = (1+x)*uL
-              self.drive(uL, uR)
-              
-          if abs(z) > .05 and abs(y) < .2:
-              uL = self.u_max*z
-              uR = -self.u_max*z
-              self.drive(uL, uR)
-
-          # turn the servo motor from the hat
-          if hat[0] != 0:
-              # turn the servo
-              self.servoAngle -= 2*hat[0]
-              self.turn_servo(self.servoAngle)
-
-          screen.blit(crosshair, ((x*250)+300-5, (y*250)+300-5))
-          pygame.draw.rect(screen, pygame.Color("red"), frameRect, 1)
-
-          for b in range(joy.get_numbuttons()):
-            if joy.get_button(b):
-              screen.blit(buttons[b][0], buttons[b][1])
-                      
-          if joy.get_button(0):
-              self.useUltrasonic = not self.useUltrasonic
-              
-          pygame.display.flip()
-          clk.tick(40)
-
 
     def remote_control(self,):
+        ''' receives a control signal from another PC on the network '''
+        
         self.servo.setPWMFreq(50)
         while True:
           data, _ = mySocket.recvfrom(SIZE)
@@ -275,27 +183,86 @@ class robot():
           #scale uL and uR by y
           uL = uR = self.u_max*y*-1
 
-          if x > 0:
+          if x > 0 and abs(y) > .2:
               uR = (1-x)*uR
               self.drive(uL, uR)
-          else :
+              
+          elif abs(y) > .2:
               uL = (1+x)*uL
               self.drive(uL, uR)
               
-          if abs(z) > .05 and abs(y) < .2:
+          elif abs(z) > .05 and abs(y) < .2:
               uL = self.u_max*z
               uR = -self.u_max*z
               self.drive(uL, uR)
+
+          else:
+              self.drive()
 
           # turn the servo motor from the hat
           if hat != 0:
               # turn the servo
               self.servoAngle -= 2*hat
               self.turn_servo(self.servoAngle)
-
           
+            
+    def send_data(self,):
+
+        while True:
+            try:
+
+              dist = self.get_range()
+              message = str(dist) + ', ' + str(self.servoAngle)
+              print message
+              sendSocket.sendto(message, (LAPTOP_IP, PORT_NUMBER2))
+              time.sleep(1.5)
+
+            except:
+                  pass
+
+
+    def stream_video(self):
+        while True:
+            try:
+                camera = picamera.PiCamera()
+                camera.resolution = (640, 480)
+                camera.framerate = 24
+                # Start a preview and let the camera warm up for 2 seconds
+                camera.start_preview()
+                time.sleep(2)
+
+                # Note the start time and construct a stream to hold image data
+                # temporarily (we could write it directly to connection but in this
+                # case we want to find out the size of each capture first to keep
+                # our protocol simple)
+                start = time.time()
+                stream = io.BytesIO()
+                for foo in camera.capture_continuous(stream, 'jpeg'):
+                    # Write the length of the capture to the stream and flush to
+                    # ensure it actually gets sent
+                    connection.write(struct.pack('<L', stream.tell()))
+                    connection.flush()
+                    # Rewind the stream and send the image data over the wire
+                    stream.seek(0)
+                    connection.write(stream.read())
+                    # If we've been capturing for more than 30 seconds, quit
+##                    if time.time() - start > 10000000000:
+##                        break
+                    # Reset the stream for the next capture
+                    stream.seek(0)
+                    stream.truncate()
+                # Write a length of zero to the stream to signal we're done
+                connection.write(struct.pack('<L', 0))
+            finally:
+                connection.close()
+                vidSocket.close()
         
+            
 if __name__ == '__main__':
     rob = robot()
+    sendThread = threading.Thread(target=rob.send_data)
+    sendThread.start()
+    videoThread = threading.Thread(target=rob.stream_video)
+    videoThread.start()
     rob.remote_control()
     
