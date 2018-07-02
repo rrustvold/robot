@@ -11,7 +11,22 @@ import threading
 import picamera
 import io, struct
 from socket import socket, gethostbyname, AF_INET, SOCK_DGRAM
+import atexit
 
+def clean_up():
+  connection.shutdown(socket.SHUT_RDWR)
+  connection.close()
+  mySocket.shutdown(socket.SHUT_RDWR)
+  mySocket.close()
+  sendSocket.shutdown(socket.SHUT_RDWR)
+  sendSocket.close()
+  vidSocket.shutdown(socket.SHUT_RDWR)
+  vidSocket.close()
+  video.stop()
+  receiver.stop()
+
+atexit.register(clean_up)
+  
 # for receiving input commands
 PORT_NUMBER = 5000
 SIZE = 1024
@@ -39,6 +54,7 @@ class robot():
         self.motorDirection = [1,1]
         self.minpwmL = 0
         self.minpwmR = 0
+        self.motorBias = 0
 
         # for gpio pins
         self.mypi = pigpio.pi()
@@ -99,6 +115,8 @@ class robot():
         to 255) also updates the motor directions so that the odometers
         count up or down correctly.
         '''
+        uL *= (1+self.motorBias)
+        uR *= (1-self.motorBias)
         
         if uL < 0:
           self.leftMotor.run(Adafruit_MotorHAT.BACKWARD)
@@ -168,11 +186,12 @@ class robot():
         self.servo.setPWMFreq(50)
         while True:
           data, _ = mySocket.recvfrom(SIZE)
-          x, y, z, hat = data.split(',')
+          x, y, z, hat, motorBias = data.split(',')
           x = float(x)
           y = float(y)
           z = float(z)
           hat = float(hat)
+          self.motorBias = float(motorBias)
 
           # saturate y to zero so that we don't get a trickle of a signal
           if abs(y) < .1:
@@ -222,46 +241,49 @@ class robot():
 
 
     def stream_video(self):
-        while True:
-            try:
-                camera = picamera.PiCamera()
-                camera.resolution = (640, 480)
-                camera.framerate = 24
-                # Start a preview and let the camera warm up for 2 seconds
-                camera.start_preview()
-                time.sleep(2)
 
-                # Note the start time and construct a stream to hold image data
-                # temporarily (we could write it directly to connection but in this
-                # case we want to find out the size of each capture first to keep
-                # our protocol simple)
-                start = time.time()
-                stream = io.BytesIO()
-                for foo in camera.capture_continuous(stream, 'jpeg'):
-                    # Write the length of the capture to the stream and flush to
-                    # ensure it actually gets sent
-                    connection.write(struct.pack('<L', stream.tell()))
-                    connection.flush()
-                    # Rewind the stream and send the image data over the wire
-                    stream.seek(0)
-                    connection.write(stream.read())
-                    # If we've been capturing for more than 30 seconds, quit
+        try:
+            camera = picamera.PiCamera()
+            camera.resolution = (640, 480)
+            camera.framerate = 12
+            # Start a preview and let the camera warm up for 2 seconds
+            camera.start_preview()
+            time.sleep(2)
+
+            # Note the start time and construct a stream to hold image data
+            # temporarily (we could write it directly to connection but in this
+            # case we want to find out the size of each capture first to keep
+            # our protocol simple)
+            start = time.time()
+            stream = io.BytesIO()
+            for foo in camera.capture_continuous(stream, 'jpeg',
+                                                 use_video_port=True):
+                # Write the length of the capture to the stream and flush to
+                # ensure it actually gets sent
+                connection.write(struct.pack('<L', stream.tell()))
+                connection.flush()
+                # Rewind the stream and send the image data over the wire
+                stream.seek(0)
+                connection.write(stream.read())
+                # If we've been capturing for more than 30 seconds, quit
 ##                    if time.time() - start > 10000000000:
 ##                        break
-                    # Reset the stream for the next capture
-                    stream.seek(0)
-                    stream.truncate()
-                # Write a length of zero to the stream to signal we're done
-                connection.write(struct.pack('<L', 0))
-            finally:
-                connection.close()
-                vidSocket.close()
+                # Reset the stream for the next capture
+                stream.seek(0)
+                stream.truncate()
+            # Write a length of zero to the stream to signal we're done
+            connection.write(struct.pack('<L', 0))
+        finally:
+            connection.close()
+            vidSocket.close()
+                
         
             
 if __name__ == '__main__':
     rob = robot()
     sendThread = threading.Thread(target=rob.send_data)
     sendThread.start()
+    
     videoThread = threading.Thread(target=rob.stream_video)
     videoThread.start()
     rob.remote_control()
