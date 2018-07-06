@@ -54,7 +54,7 @@ class robot():
         self.motorDirection = [1,1]
         self.minpwmL = 0
         self.minpwmR = 0
-        self.motorBias = 0
+        self.motorBias = -.065
 
         # for gpio pins
         self.mypi = pigpio.pi()
@@ -191,7 +191,7 @@ class robot():
           y = float(y)
           z = float(z)
           hat = float(hat)
-          self.motorBias = float(motorBias)
+##          self.motorBias = float(motorBias)
 
           # saturate y to zero so that we don't get a trickle of a signal
           if abs(y) < .1:
@@ -232,7 +232,6 @@ class robot():
 
               dist = self.get_range()
               message = str(dist) + ', ' + str(self.servoAngle)
-              print message
               sendSocket.sendto(message, (LAPTOP_IP, PORT_NUMBER2))
               time.sleep(1.5)
 
