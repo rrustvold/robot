@@ -9,6 +9,7 @@ import io, struct
 import atexit
 from StringIO import StringIO
 import time
+from scipy import ndimage
 
 def clean_up():
   connection.shutdown(socket.SHUT_RDWR)
@@ -51,8 +52,11 @@ def stream_video():
         # Rewind the stream, open it as an image with PIL and do some
         # processing on it
         image_stream.seek(0)
-        image = Image.open(image_stream).rotate(-90).transpose(
-          Image.FLIP_TOP_BOTTOM)
+
+##        image = Image.open(image_stream).rotate(90).transpose(
+##          Image.FLIP_TOP_BOTTOM)
+
+        image = Image.open(image_stream)
 
         imgForCv = np.array(image)
         imgForCv = cv2.cvtColor(imgForCv, cv2.COLOR_RGB2BGR)
@@ -75,12 +79,13 @@ def tracker_init(target=(340,240)):
   global hueToTrack
   global HSVUpper
   global HSVLower
+
   
   # initial tracking window location
   h = 20
   w = 20
-  r = target[0]-h
-  c = target[1]-w
+  r = target[1]-h
+  c = target[0]-w
   track_window = (c,r,w,h)
 
   # setup up ROI for tracking
@@ -101,13 +106,15 @@ def tracker_init(target=(340,240)):
   term_crit = ( cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 1 )
 
 
-def locate_object(image):
+def locate_object(imagec):
   ''' Applies camshift to the global tracker window '''
   global track_window
   global roi_hist
   global term_crit
   global center
-  
+
+  # make a copy of the image so we don't draw over the original
+  image = imagec.copy()
   
   hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
   dst = cv2.calcBackProject([hsv], [0], roi_hist, [0,180], 1)
@@ -118,8 +125,9 @@ def locate_object(image):
   pts = np.int0(pts)
 
   try:
-    center[1] = int(moments['m10'] / moments['m00'])
-    center[0] = int(moments['m01'] / moments['m00'])
+    center[1] = int(moments['m10'] / moments['m00']) # y_coor of center
+    center[0] = int(moments['m01'] / moments['m00']) # x_coor of center
+    center[2] = moments['m00'] # area of rectangle
   except:
     pass
 
@@ -133,21 +141,35 @@ def locate_object(image):
     return cv2.cvtColor(cv2.polylines(res, [pts], True, 255, 2),
                       cv2.COLOR_BGR2RGB)
 
+  if displayMode == 2:
+    edges = cv2.Canny(image, 100,200)
+    return edges
+
+  if displayMode == 3:
+    return cv2.Laplacian(image, cv2.CV_64F)
+
+  if displayMode == 4:
+    return locate_face(image)
+
+
+
 def locate_face(image):
   global face_cascade
+  
   gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-  face = face_cascade.detectMultiScale(gray, 1.1, 3)
-  print face
-  for (x,y,w,h) in face:
-    print "got one"
+
+  faces = face_cascade.detectMultiScale(gray, 1.1, 2)
+  
+  try:
+    x,y,w,h = faces[0]
     cv2.rectangle(image, (x,y), (x+w, y+h), (255,0,0), 2)
+    center[1] = x+w/2
+    center[0] = y+h/2
+    center[2] = w*h
+  except:
+    pass
 
   return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-##  return gray
-
-
-bgImage = None
-imgForCv = None  
 
 
 address = "C:\opencv\sources\data\haarcascades\\"
@@ -155,9 +177,10 @@ classifier = 'haarcascade_frontalface_default.xml'
 
 cascade = address + classifier
 face_cascade = cv2.CascadeClassifier(cascade)
-if face_cascade.empty():
-    print cascade
-    print "empty"
+
+bgImage = None
+imgForCv = None  
+
 
 #FOR SENDING
 RASPI_IP   = '192.168.1.20'
@@ -212,7 +235,7 @@ writer = pygame.font.Font(pygame.font.get_default_font(), 15)
 buttons = {}
 
 data = {'distance':0, 'servoAngle':90}
-center = [0,0]
+center = [0,0, 0]
 
 for b in range(joy.get_numbuttons()):
   buttons[b] = [
@@ -239,7 +262,7 @@ time.sleep(4)
 
 tracker_init()
 
-displayModes = ['normal', 'mask']
+displayModes = ['normal', 'mask', 'edges', 'laplacian', 'faces']
 numDisplayModes= len(displayModes)
 displayMode = 0
 followObject = False
@@ -254,15 +277,11 @@ while True:
       pygame.quit()
       sys.exit()
 
-##  try:
-##    screen.blit(bgImage, [margin,margin])
-##
-##
-##  except Exception as e:
-##    print "blit: "
-##    print e
   try:
+    # For detecting colors / faces / other image filtering
     window = pygame.surfarray.make_surface(locate_object(imgForCv))
+    window = pygame.transform.rotate(window, -90)
+    window = pygame.transform.flip(window, 1, 0)
     screen.blit(window, [margin,margin])
   except Exception as e:
     print e
@@ -270,10 +289,11 @@ while True:
   # x, y, and z are the roll, pitch, and yaw axes
   # they are a value from [-1,1]
 
-  
+  throttle = joy.get_axis(2)
   if followObject:
-    x = np.interp(center[0], [0,640], [-1,1])
-    y = -.5
+    x = np.interp(center[1], [0,640], [-1,1])
+    signal = np.interp(center[2], [0,480*640], [1,0])
+    y = signal*throttle
     z = 0
   else:
     x = joy.get_axis(0)  # positive is to the right
@@ -281,10 +301,9 @@ while True:
     z = joy.get_axis(3)
     
 
-  hat = joy.get_hat(0)[0]
-  motorBias = joy.get_axis(2)
+  hat = joy.get_hat(0)[1]
 
-  message = "{}, {}, {}, {}, {}".format(x,y,z,hat, motorBias)
+  message = "{}, {}, {}, {}, {}".format(x,y,z,hat, throttle)
   
   if not joy.get_button(2):
     mySocket.sendto(message, (RASPI_IP,PORT_NUMBER))
@@ -298,8 +317,8 @@ while True:
 
   #Draw the range detector value in the upper right corner
   rangeTxt = writer.render(
-            "Distance = {0:.2f} m, servo angle = {1:.2f}, Bias = {2}".format(
-             data['distance'], data['servoAngle'], motorBias),
+            "Distance = {0:.2f} m, servo angle = {1:.2f}, throttle = {2}".format(
+             data['distance'], data['servoAngle'], throttle),
                   1,
                   pygame.Color("red"),
                   pygame.Color("black"),
@@ -356,7 +375,7 @@ while True:
   
   
   pygame.display.flip()
-  clk.tick(40)
+  clk.tick(20)
 
 
   
